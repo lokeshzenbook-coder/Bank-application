@@ -1,0 +1,69 @@
+# kube-prometheus-stack: Prometheus + Alertmanager + Grafana + node-exporter +
+# kube-state-metrics. Grafana is wired to Loki (logs) and Tempo (traces) with
+# log<->trace correlation so you can jump metrics -> logs -> traces.
+
+prometheus:
+  prometheusSpec:
+    retention: 12h
+    # Served under /prometheus on the apex host (Traefik IngressRoute).
+    externalUrl: https://vijaygiduthuri.in/prometheus
+    routePrefix: /prometheus
+    # Discover ServiceMonitors/PodMonitors in ALL namespaces (not just this release).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { cpu: "1", memory: 1500Mi }
+
+alertmanager:
+  alertmanagerSpec:
+    # Served under /alertmanager on the apex host (Traefik IngressRoute).
+    externalUrl: https://vijaygiduthuri.in/alertmanager
+    routePrefix: /alertmanager
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+      limits: { cpu: 200m, memory: 256Mi }
+
+grafana:
+  adminPassword: admin
+  # Served under /grafana on the apex host (Traefik IngressRoute).
+  grafana.ini:
+    server:
+      root_url: https://vijaygiduthuri.in/grafana
+      serve_from_sub_path: true
+  defaultDashboardsEnabled: true
+  service:
+    type: NodePort
+    nodePort: 30090
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki-stack.observability.svc.cluster.local:3100
+      jsonData:
+        derivedFields:
+          - name: TraceID
+            matcherRegex: '"trace_id":"(\w+)"'
+            datasourceUid: tempo
+            url: "$${__value.raw}"
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3200
+      jsonData:
+        tracesToLogsV2:
+          datasourceUid: loki
+          filterByTraceID: true
+          spanStartTimeShift: "-5m"
+          spanEndTimeShift: "5m"
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
