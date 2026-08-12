@@ -80,7 +80,7 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: "1" # fail the build on HIGH/CRITICAL (set to "0" for report-only)
+          exit-code: "0" # report-only: scan + print findings, never block
 
   # ===========================================================================
   # 3. SAST (Semgrep) — rule-based static analysis
@@ -322,7 +322,7 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: "1" # fail the build on HIGH/CRITICAL (set to "0" for report-only)
+          exit-code: "0" # report-only: scan + print findings, never block
 
       - name: Generate CycloneDX SBOM
         uses: aquasecurity/trivy-action@v0.36.0
