@@ -157,7 +157,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.12.2 # v1.x is built with Go 1.24 and cannot lint a go 1.25 workspace
           working-directory: .
 
       - name: gofmt check
