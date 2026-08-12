@@ -1,0 +1,394 @@
+# ==============================================================================
+# Banking Platform — DevSecOps CI (CI part only)
+# ------------------------------------------------------------------------------
+# Security-first pipeline. Stages run sequentially via `needs:` so a failing
+# scan stops the pipeline before images are built/published.
+#
+#  1. Secrets scan            gitleaks
+#  2. Trivy filesystem scan   Trivy (fs)
+#  3. SAST (Semgrep)          Semgrep
+#  4. SCA (OWASP)             OWASP Dependency-Check
+#  5. Lint & format           golangci-lint + gofmt
+#  6. Unit tests              go test (workspace) + frontend build
+#  7. Build                   docker build (buildx) for all services + frontend
+#  8. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
+#  9. Push image              push to Amazon ECR (main only)
+#
+# Required GitHub configuration:
+#   Secrets:
+#     AWS_ACCESS_KEY_ID       - IAM access key (ECR push policy)
+#     AWS_SECRET_ACCESS_KEY   - matching secret access key
+#     SEMGREP_APP_TOKEN       - optional, for publishing Semgrep findings
+#   Variables:
+#     AWS_REGION              - e.g. us-east-1
+#     ECR_REGISTRY            - e.g. <account>.dkr.ecr.us-east-1.amazonaws.com
+#     ECR_REPOSITORY          - e.g. banking-platform (single repo, tag differs)
+# =============================================================================
+name: DevSecOps CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  # Full single-repo image prefix, e.g.
+  #   <account>.dkr.ecr.us-east-1.amazonaws.com/banking-platform
+  IMAGE_PREFIX: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}
+
+jobs:
+  # ===========================================================================
+  # 1. Secrets scan — gitleaks
+  # ===========================================================================
+  secrets-scan:
+    name: 1. Secrets scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks secrets scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # 2. Trivy filesystem scan — repo-wide vuln scan (source + deps + IaC)
+  # ===========================================================================
+  trivy-fs-scan:
+    name: 2. Trivy filesystem scan
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1" # fail the build on HIGH/CRITICAL (set to "0" for report-only)
+
+  # ===========================================================================
+  # 3. SAST (Semgrep) — rule-based static analysis
+  # ===========================================================================
+  sast-semgrep:
+    name: 3. SAST (Semgrep)
+    runs-on: ubuntu-latest
+    needs: trivy-fs-scan
+    permissions:
+      contents: read
+      security-events: write # for SARIF upload to code scanning
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Semgrep scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }} # optional
+          generateSarif: "1"
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always()
+        continue-on-error: true # needs Advanced Security enabled
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+  # ===========================================================================
+  # 4. SCA (OWASP Dependency-Check) — dependency vulnerability check
+  # ===========================================================================
+  sca-owasp:
+    name: 4. SCA (OWASP)
+    runs-on: ubuntu-latest
+    needs: sast-semgrep
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: Banking-Platform
+          path: .
+          format: HTML
+          args: >
+            --failOnCVSS 9
+            --enableRetired
+
+      - name: Upload OWASP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dependency-check-report
+          path: reports/
+
+  # ===========================================================================
+  # 5. Lint & format — golangci-lint + gofmt
+  # ===========================================================================
+  lint:
+    name: 5. Lint & format
+    runs-on: ubuntu-latest
+    needs: sca-owasp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: .
+
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+          if [ -n "$unformatted" ]; then
+            echo "The following Go files are not gofmt formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # 6. Unit tests — go test across the workspace + frontend compile check
+  # ===========================================================================
+  unit-tests:
+    name: 6. Unit tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+
+      - name: Go tests (workspace)
+        run: go test ./...
+
+      - name: Frontend build (compile check)
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+  # ===========================================================================
+  # 7. Build — docker build all images in parallel (load locally + archive
+  #    for the scan and push stages, which run on fresh runners).
+  # ===========================================================================
+  build:
+    name: 7. Build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        # Shared service matrix (YAML anchor, defined on first use) so build /
+        # scan / push stay in sync.
+        service: &services
+          - auth-service
+          - authz-service
+          - customer-service
+          - profile-service
+          - kyc-service
+          - document-service
+          - ledger-service
+          - account-service
+          - transaction-service
+          - beneficiary-service
+          - payment-service
+          - wallet-service
+          - loan-service
+          - emi-service
+          - fixed-deposit-service
+          - recurring-deposit-service
+          - card-service
+          - investment-service
+          - currency-exchange-service
+          - audit-service
+          - fraud-service
+          - notification-service
+          - statement-service
+          - reports-service
+          - analytics-service
+          - search-service
+          - email-service
+          - sms-service
+          - support-service
+          - admin-service
+          - api-gateway
+          - frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha=$(echo "${GITHUB_SHA}" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Backend services share build/service.Dockerfile + SERVICE build-arg;
+      # the frontend has its own Dockerfile.
+      - name: Resolve build inputs
+        id: img
+        run: |
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            echo "context=./frontend" >> "$GITHUB_OUTPUT"
+            echo "dockerfile=./frontend/Dockerfile" >> "$GITHUB_OUTPUT"
+            echo "buildargs=" >> "$GITHUB_OUTPUT"
+          else
+            echo "context=." >> "$GITHUB_OUTPUT"
+            echo "dockerfile=build/service.Dockerfile" >> "$GITHUB_OUTPUT"
+            echo "buildargs=SERVICE=${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.img.outputs.context }}
+          file: ${{ steps.img.outputs.dockerfile }}
+          build-args: ${{ steps.img.outputs.buildargs }}
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-${{ steps.vars.outputs.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      - name: Archive image
+        run: docker save ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-${{ steps.vars.outputs.sha }} | gzip > /tmp/${{ matrix.service }}.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/${{ matrix.service }}.tar.gz
+          retention-days: 7
+
+  # ===========================================================================
+  # 8. Image scan & SBOM — Trivy image scan (gate) + CycloneDX SBOM artifact
+  # ===========================================================================
+  image-scan-sbom:
+    name: 8. Image scan & SBOM (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        service: *services
+    steps:
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha=$(echo "${GITHUB_SHA}" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/img
+
+      - name: Load image
+        run: docker load -i /tmp/img/${{ matrix.service }}.tar.gz
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-${{ steps.vars.outputs.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1" # fail the build on HIGH/CRITICAL (set to "0" for report-only)
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-${{ steps.vars.outputs.sha }}
+          format: cyclonedx
+          output: sbom-${{ matrix.service }}.cdx.json
+          skip-setup-trivy: true
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.cdx.json
+          retention-days: 7
+
+  # ===========================================================================
+  # 9. Push image — ECR push of <service>-<sha> and <service>-latest.
+  #    Runs only after every scan passes, on main pushes / manual runs.
+  # ===========================================================================
+  push-image:
+    name: 9. Push image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: image-scan-sbom
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: *services
+    steps:
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha=$(echo "${GITHUB_SHA}" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/img
+
+      - name: Load image
+        run: docker load -i /tmp/img/${{ matrix.service }}.tar.gz
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image (sha + latest)
+        env:
+          IMG: ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-${{ steps.vars.outputs.sha }}
+          LATEST: ${{ env.IMAGE_PREFIX }}:${{ matrix.service }}-latest
+        run: |
+          docker tag "$IMG" "$LATEST"
+          docker push "$IMG"
+          docker push "$LATEST"
