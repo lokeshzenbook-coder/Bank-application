@@ -154,11 +154,19 @@ jobs:
           go-version-file: go.work
           cache-dependency-path: "**/go.sum"
 
+      # FIX: exit code 7 from golangci-lint is `ErrorWasLogged` — an internal
+      # setup/run error (bad config schema, package-load failure, or the run
+      # getting killed by the linter's own default 1m timeout on a 31-module
+      # go.work workspace), NOT ordinary lint findings (that's exit code 1).
+      #   -v              surfaces the real underlying error in the log
+      #   --timeout=10m   default timeout is far too short for this many modules
+      #   --allow-parallel-runners  avoids a lock-file error when caches overlap
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9.3.0 # v7+ required for golangci-lint v2
         with:
           version: v2.12.2 # v1.x is built with Go 1.24 and cannot lint a go 1.25 workspace
           working-directory: .
+          args: -v --timeout=10m --allow-parallel-runners
 
       - name: gofmt check
         run: |
