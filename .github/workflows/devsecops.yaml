@@ -17,7 +17,7 @@
 # Required GitHub configuration:
 #   Secrets:
 #     DOCKERHUB_USERNAME      - Docker Hub username
-#     DOCKERHUB_TOKEN         - Docker Hub access token (or password)
+#     DOCKERHUB_PASSWORD      - Docker Hub account password (or access token)
 #     SEMGREP_APP_TOKEN       - optional, for publishing Semgrep findings
 # =============================================================================
 name: DevSecOps CI
