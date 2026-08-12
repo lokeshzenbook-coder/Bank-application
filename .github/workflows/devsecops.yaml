@@ -12,17 +12,13 @@
 #  6. Unit tests              go test (workspace) + frontend build
 #  7. Build                   docker build (buildx) for all services + frontend
 #  8. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
-#  9. Push image              push to Amazon ECR (main only)
+#  9. Push image              push to Docker Hub (main only)
 #
 # Required GitHub configuration:
 #   Secrets:
-#     AWS_ACCESS_KEY_ID       - IAM access key (ECR push policy)
-#     AWS_SECRET_ACCESS_KEY   - matching secret access key
+#     DOCKERHUB_USERNAME      - Docker Hub username
+#     DOCKERHUB_TOKEN         - Docker Hub access token (or password)
 #     SEMGREP_APP_TOKEN       - optional, for publishing Semgrep findings
-#   Variables:
-#     AWS_REGION              - e.g. us-east-1
-#     ECR_REGISTRY            - e.g. <account>.dkr.ecr.us-east-1.amazonaws.com
-#     ECR_REPOSITORY          - e.g. banking-platform (single repo, tag differs)
 # =============================================================================
 name: DevSecOps CI
 
@@ -40,10 +36,8 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  # Full single-repo image prefix, e.g.
-  #   <account>.dkr.ecr.us-east-1.amazonaws.com/banking-platform
-  IMAGE_PREFIX: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}
+  # Full single-repo image prefix, e.g. <dockerhub-user>/banking-platform
+  IMAGE_PREFIX: ${{ secrets.DOCKERHUB_USERNAME }}/banking-platform
 
 jobs:
   # ===========================================================================
@@ -348,7 +342,7 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # 9. Push image — ECR push of <service>-<sha> and <service>-latest.
+  # 9. Push image — Docker Hub push of <service>-<sha> and <service>-latest.
   #    Runs only after every scan passes, on main pushes / manual runs.
   # ===========================================================================
   push-image:
@@ -374,15 +368,11 @@ jobs:
       - name: Load image
         run: docker load -i /tmp/img/${{ matrix.service }}.tar.gz
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push image (sha + latest)
         env:
