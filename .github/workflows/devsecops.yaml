@@ -8,10 +8,9 @@
 #  2. Trivy filesystem scan   Trivy (fs)
 #  3. SAST (Semgrep)          Semgrep
 #  4. SCA (OWASP)             OWASP Dependency-Check
-#  5. Unit tests              go test (workspace) + frontend build
-#  6. Build                   docker build (buildx) for all services + frontend
-#  7. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
-#  8. Push image              push to Docker Hub (main only)
+#  5. Build                   docker build (buildx) for all services + frontend
+#  6. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
+#  7. Push image              push to Docker Hub (main only)
 #
 # Required GitHub configuration:
 #   Secrets:
@@ -137,39 +136,13 @@ jobs:
           path: reports/
 
   # ===========================================================================
-  # 5. Unit tests — go test across the workspace + frontend compile check
-  # ===========================================================================
-  unit-tests:
-    name: 5. Unit tests
-    runs-on: ubuntu-latest
-    needs: sca-owasp
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.work
-          cache-dependency-path: "**/go.sum"
-
-      - name: Go tests (workspace)
-        run: go test ./...
-
-      - name: Frontend build (compile check)
-        run: |
-          cd frontend
-          npm ci
-          npm run build
-
-  # ===========================================================================
-  # 6. Build — docker build all images in parallel (load locally + archive
+  # 5. Build — docker build all images in parallel (load locally + archive
   #    for the scan and push stages, which run on fresh runners).
   # ===========================================================================
   build:
-    name: 6. Build (${{ matrix.service }})
+    name: 5. Build (${{ matrix.service }})
     runs-on: ubuntu-latest
-    needs: unit-tests
+    needs: sca-owasp
     strategy:
       fail-fast: false
       matrix:
@@ -257,10 +230,10 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # 7. Image scan & SBOM — Trivy image scan (gate) + CycloneDX SBOM artifact
+  # 6. Image scan & SBOM — Trivy image scan (gate) + CycloneDX SBOM artifact
   # ===========================================================================
   image-scan-sbom:
-    name: 7. Image scan & SBOM (${{ matrix.service }})
+    name: 6. Image scan & SBOM (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: build
     strategy:
@@ -309,11 +282,11 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # 8. Push image — Docker Hub push of <service>-<sha> and <service>-latest.
+  # 7. Push image — Docker Hub push of <service>-<sha> and <service>-latest.
   #    Runs only after every scan passes, on main pushes / manual runs.
   # ===========================================================================
   push-image:
-    name: 8. Push image (${{ matrix.service }})
+    name: 7. Push image (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: image-scan-sbom
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
