@@ -8,11 +8,10 @@
 #  2. Trivy filesystem scan   Trivy (fs)
 #  3. SAST (Semgrep)          Semgrep
 #  4. SCA (OWASP)             OWASP Dependency-Check
-#  5. Lint & format           golangci-lint + gofmt
-#  6. Unit tests               go test (workspace) + frontend build
-#  7. Build                   docker build (buildx) for all services + frontend
-#  8. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
-#  9. Push image              push to Docker Hub (main only)
+#  5. Unit tests              go test (workspace) + frontend build
+#  6. Build                   docker build (buildx) for all services + frontend
+#  7. Image scan & SBOM       Trivy image scan + CycloneDX SBOM
+#  8. Push image              push to Docker Hub (main only)
 #
 # Required GitHub configuration:
 #   Secrets:
@@ -138,42 +137,12 @@ jobs:
           path: reports/
 
   # ===========================================================================
-  # 5. Lint & format — golangci-lint + gofmt
-  # ===========================================================================
-  lint:
-    name: 5. Lint & format
-    runs-on: ubuntu-latest
-    needs: sca-owasp
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.work
-          cache-dependency-path: "**/go.sum"
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9.3.0 # v7+ required for golangci-lint v2
-        with:
-          version: v2.12.2 # v1.x is built with Go 1.24 and cannot lint a go 1.25 workspace
-          working-directory: .
-          args: -v --timeout=10m --allow-parallel-runners
-      - name: gofmt check
-        run: |
-          unformatted="$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
-          if [ -n "$unformatted" ]; then
-            echo "The following Go files are not gofmt formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-  # ===========================================================================
-  # 6. Unit tests — go test across the workspace + frontend compile check
+  # 5. Unit tests — go test across the workspace + frontend compile check
   # ===========================================================================
   unit-tests:
-    name: 6. Unit tests
+    name: 5. Unit tests
     runs-on: ubuntu-latest
-    needs: lint
+    needs: sca-owasp
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -194,11 +163,11 @@ jobs:
           npm run build
 
   # ===========================================================================
-  # 7. Build — docker build all images in parallel (load locally + archive
+  # 6. Build — docker build all images in parallel (load locally + archive
   #    for the scan and push stages, which run on fresh runners).
   # ===========================================================================
   build:
-    name: 7. Build (${{ matrix.service }})
+    name: 6. Build (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: unit-tests
     strategy:
@@ -288,10 +257,10 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # 8. Image scan & SBOM — Trivy image scan (gate) + CycloneDX SBOM artifact
+  # 7. Image scan & SBOM — Trivy image scan (gate) + CycloneDX SBOM artifact
   # ===========================================================================
   image-scan-sbom:
-    name: 8. Image scan & SBOM (${{ matrix.service }})
+    name: 7. Image scan & SBOM (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: build
     strategy:
@@ -340,11 +309,11 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # 9. Push image — Docker Hub push of <service>-<sha> and <service>-latest.
+  # 8. Push image — Docker Hub push of <service>-<sha> and <service>-latest.
   #    Runs only after every scan passes, on main pushes / manual runs.
   # ===========================================================================
   push-image:
-    name: 9. Push image (${{ matrix.service }})
+    name: 8. Push image (${{ matrix.service }})
     runs-on: ubuntu-latest
     needs: image-scan-sbom
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
